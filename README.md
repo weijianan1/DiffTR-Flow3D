@@ -1,5 +1,5 @@
 # DiffTR-Flow3D
-This repository contains the source code DiffTR-Flow3D for our paper: "Generative AI models for exploring particle diffusion from time-resolved particle tracking".
+This repository contains the source code DiffTR-Flow3D for our paper: "Generative AI models for exploring diffusion dynamics from time-resolved particle tracking".
 
 ## Reproduction
 
