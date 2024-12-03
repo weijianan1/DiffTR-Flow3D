@@ -52,12 +52,6 @@ class PointNet(nn.Module):
         self.bn4 = nn.BatchNorm1d(128)
         self.bn5 = nn.BatchNorm1d(self.outchannel)
 
-        # self.bn1 = nn.InstanceNorm1d(64)
-        # self.bn2 = nn.InstanceNorm1d(64)
-        # self.bn3 = nn.InstanceNorm1d(64)
-        # self.bn4 = nn.InstanceNorm1d(128)
-        # self.bn5 = nn.InstanceNorm1d(self.outchannel)
-
     def forward(self, x): # x torch.Size([B, 3, 8192])
         x = F.relu(self.bn1(self.conv1(x)))
         x = F.relu(self.bn2(self.conv2(x)))
@@ -72,12 +66,6 @@ class DGCNN(nn.Module):
         super(DGCNN, self).__init__()
         self.outchannel = output_channels
         self.k = k
-    
-        # self.bn1 = nn.InstanceNorm2d(64)
-        # self.bn2 = nn.InstanceNorm2d(64)
-        # self.bn3 = nn.InstanceNorm2d(64)
-        # self.bn4 = nn.InstanceNorm2d(128)
-        # self.bn5 = nn.InstanceNorm1d(self.outchannel)
 
         self.bn1 = nn.BatchNorm2d(64)
         self.bn2 = nn.BatchNorm2d(64)

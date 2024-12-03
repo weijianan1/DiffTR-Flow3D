@@ -261,13 +261,9 @@ class GaussianDiffusion(nn.Module):
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
-        # print(times)
         time_pairs = list(zip(times[:-1], times[1:])) # [(T-1, T-2), (T-2, T-3), ..., (1, 0), (0, -1)]
         flow = torch.randn(shape, device = device)
         flows = [flow]
-        # print(time_pairs)
-        # exit()
-        # for time, time_next in tqdm(time_pairs, desc = 'sampling loop time step'):  # [(19, 9), (9, -1)]
         for time, time_next in time_pairs:
             time_cond = torch.full((batch,), time, device = device, dtype = torch.long)
             self_cond = self_cond if self.self_condition else None
@@ -290,11 +286,9 @@ class GaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def sample(self, pcs, return_all_timesteps = False):
-        # batch_size, num_frames, _, num_points= pcs.shape
         batch_size, _, num_points= pcs.shape
         device = pcs.device
         sample_fn = self.p_sample_loop if not self.is_ddim_sampling else self.ddim_sample
-        # return sample_fn((batch_size, num_frames, 3, num_points), pcs, return_all_timesteps = return_all_timesteps)
         return sample_fn((batch_size, 3, num_points), pcs, return_all_timesteps = return_all_timesteps)
 
     @torch.inference_mode()
@@ -313,7 +307,6 @@ class GaussianDiffusion(nn.Module):
         offset_noise_strength = default(offset_noise_strength, self.offset_noise_strength)
         if offset_noise_strength > 0.:
             offset_noise = torch.randn(x_start.shape[:2], device = self.device)
-            #noise += offset_noise_strength * rearrange(offset_noise, 'b c -> b c 1 1')
             noise += offset_noise_strength * offset_noise[:,:,None,None]
         # noise sample
         x = self.q_sample(x_start = x_start, t = t, noise = noise)
@@ -330,7 +323,6 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown objective {self.objective}')
         loss, metrics_3d = sceneflow_loss_func(model_out, target)
-        #loss = loss * extract(self.loss_weight, t, loss.shape)
         return loss.mean(), metrics_3d
 
     def forward(self, flow_3d, pcs, *args, **kwargs):

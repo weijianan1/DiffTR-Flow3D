@@ -40,10 +40,6 @@ def index_points(points, idx):
     Return:
         new_points:, indexed points data, [B, S, [K], C]
     """
-    #raw_size = idx.size()
-    #idx = idx.reshape(raw_size[0], -1)
-    #res = torch.gather(points, 1, idx[..., None].expand(-1, -1, points.size(-1)))
-    #return res.reshape(*raw_size, -1)
 
     B,S,K = idx.shape
     B,N,C = points.shape
@@ -251,11 +247,6 @@ class FeatureTransformer3D(nn.Module):
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p) # Add Zero initialization for convolutional layers prior to any residual connections
-        
-#        for block in self.layers:
-#            nn.init.constant_(block.self_attn.merge.weight, 0)
-#            nn.init.constant_(block.cross_attn_ffn.mlp[0].weight, 0)
-#            nn.init.constant_(block.cross_attn_ffn.mlp[2].weight, 0)
 
 
     def forward(self, feature0, feature1,
@@ -268,7 +259,6 @@ class FeatureTransformer3D(nn.Module):
         feature0 = feature0.permute(0, 2, 1)  # [B, N, C]
         feature1 = feature1.permute(0, 2, 1)  # [B, N, C]
 
-        # 是放在batch size上的
         # concat feature0 and feature1 in batch dimension to compute in parallel
         concat0 = torch.cat((feature0, feature1), dim=0)  # [2B, N, C]
         concat1 = torch.cat((feature1, feature0), dim=0)  # [2B, N, C]
