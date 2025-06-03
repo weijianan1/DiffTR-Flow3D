@@ -15,7 +15,7 @@ from datasetloader.datasets import build_train_dataset, build_test_dataset
 
 from utils import compute_epe2
 
-import wandb
+# import wandb
 import torch.distributed as dist
 import random
 import os
@@ -206,14 +206,14 @@ class Trainer(object):
                         'epoch': self.epoch,
                     }, checkpoint_path)
 
-                if self.args.wandb and get_rank() == 0: 
-                    wandb.log({
-                        'Loss': np.array(loss_train).mean(),
-                        'EPE': result['EPE'],
-                        'Outlier': result['Outlier'],
-                        'Acc3dRelax': result['Acc3dRelax'],
-                        'Acc3dStrict': result['Acc3dStrict'],
-                    })
+                # if self.args.wandb and get_rank() == 0: 
+                #     wandb.log({
+                #         'Loss': np.array(loss_train).mean(),
+                #         'EPE': result['EPE'],
+                #         'Outlier': result['Outlier'],
+                #         'Acc3dRelax': result['Acc3dRelax'],
+                #         'Acc3dStrict': result['Acc3dStrict'],
+                #     })
 
             self.epoch += 1
 
@@ -495,11 +495,11 @@ def get_args_parser():
     parser.add_argument('--num_epochs', default=100, type=int)
     parser.add_argument('--test_epoch', default=600, type=int)
 
-    # * WanDB
-    parser.add_argument('--wandb', action='store_true')
-    parser.add_argument('--project_name', default='climate')
-    parser.add_argument('--group_name', default='economics')
-    parser.add_argument('--run_name', default='test')
+    # # * WanDB
+    # parser.add_argument('--wandb', action='store_true')
+    # parser.add_argument('--project_name', default='climate')
+    # parser.add_argument('--group_name', default='economics')
+    # parser.add_argument('--run_name', default='test')
     return parser
 
 
@@ -536,15 +536,15 @@ if __name__ == '__main__':
         sampling_timesteps = args.samplingtimesteps    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
     ).to(device)
 
-    # add argparse
-    if args.wandb and get_rank() == 0:
-        wandb.init(
-            project=args.project_name,
-            group=args.group_name,
-            name=args.run_name,
-            config=args
-        )
-        wandb.watch(diffusion)
+    # # add argparse
+    # if args.wandb and get_rank() == 0:
+    #     wandb.init(
+    #         project=args.project_name,
+    #         group=args.group_name,
+    #         name=args.run_name,
+    #         config=args
+    #     )
+    #     wandb.watch(diffusion)
 
     # test
     if args.eval:
