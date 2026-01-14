@@ -70,7 +70,7 @@ CUDA_VISIBLE_DEVICES=0,1 python difftr_flow3d_main.py \
 
 ### 4. Evaluation
 
-To evaluate a pre-trained model:
+To evaluate a pre-trained model (available on [[Google Drive]](https://drive.google.com/drive/folders/1zBdeqwQTmWd6gOKrgGV_n9yKe3iA24n4?usp=sharing)):
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1 python difftr_flow3d_main.py \
