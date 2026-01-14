@@ -103,7 +103,7 @@ The model implements a sophisticated generative pipeline for 3D fluid flow estim
     * For time-resolved sequences, the model performs test-time training using **Ridge Regression** to fit polynomial trajectories (Equation 13).
     * This provides a reliable initial condition for the reverse diffusion process in subsequent frames.
 * **Loss Function**: 
-    * The training objective is a robust regression loss: $L = \sum((||D_{est} - D_{gt}||_{1} + 0.01)^{0.4})$.
+    * The training objective is a robust regression loss: $L = \sum(({\vert\vert D_{est} - D_{gt}\vert\vert}_{1} + 0.01)^{0.4})$.
 
 ---
 
