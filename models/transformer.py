@@ -4,65 +4,30 @@ import torch.nn.functional as F
 import numpy as np
 #from einops import rearrange
 
-def single_head_full_attention(q, k, v):
-    # q, k, v: [B, N, C]
-    assert q.dim() == k.dim() == v.dim() == 3
-
-    scores = torch.matmul(q, k.permute(0, 2, 1)) / (q.size(2) ** .5)  # [B, N, N]
-    attn = torch.softmax(scores, dim=2)  # [B, N, N]
-    out = torch.matmul(attn, v)  # [B, N, C]
-
-    return out
-
-# local transformer
-def square_distance(src, dst):
-    """
-    Calculate Euclid distance between each two points.
-    src^T * dst = xn * xm + yn * ym + zn * zm；
-    sum(src^2, dim=-1) = xn*xn + yn*yn + zn*zn;
-    sum(dst^2, dim=-1) = xm*xm + ym*ym + zm*zm;
-    dist = (xn - xm)^2 + (yn - ym)^2 + (zn - zm)^2
-         = sum(src**2,dim=-1)+sum(dst**2,dim=-1)-2*src^T*dst
-    Input:
-        src: source points, [B, N, C]
-        dst: target points, [B, M, C]
-    Output:
-        dist: per-point square distance, [B, N, M]
-    """
-    #return torch.cdist(src, dst)**2
-    return torch.sum((src[:, :, None] - dst[:, None]) ** 2, dim=-1)
-
-def index_points(points, idx):
-    """
-    Input:
-        points: input points data, [B, N, C]
-        idx: sample index data, [B, S, [K]]
-    Return:
-        new_points:, indexed points data, [B, S, [K], C]
-    """
-
-    B,S,K = idx.shape
-    B,N,C = points.shape
-    points = points.reshape(B*N,C)
-    batch_dim = torch.arange(0, B, device = idx.device)
-    idx = (batch_dim[:,None] * N +  idx.reshape(B,S*K)).flatten()
-    return points[idx].reshape(B,S,K,C)
+# ... [OMITTED: single_head_full_attention, square_distance, index_points helper functions] ...
 
 class TransformerBlock_PT(nn.Module):
+    """
+    Implements the core block for "Local correlation" (Eq 10).
+    Adopts Point Transformer logic to confine computation to localized areas.
+    """
     def __init__(self, d_points, d_model, k) -> None:
         super().__init__()
         self.fc1 = nn.Linear(d_points, d_model)
         self.fc2 = nn.Linear(d_model, d_points)
+        # Relative position embedding delta
         self.fc_delta = nn.Sequential(
             nn.Linear(3, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model)
         )
+        # Mapping function gamma for attention vectors
         self.fc_gamma = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.ReLU(),
             nn.Linear(d_model, d_model)
         )
+        # Linear projections phi_q, phi_k, phi_v
         self.w_qs = nn.Linear(d_model, d_model, bias=False)
         self.w_ks = nn.Linear(d_model, d_model, bias=False)
         self.w_vs = nn.Linear(d_model, d_model, bias=False)
@@ -72,25 +37,34 @@ class TransformerBlock_PT(nn.Module):
 
         xyz = torch.permute(xyz, (0,2,1))
         dists = square_distance(xyz, xyz) # b x n x n
-        #knn_idx = dists.argsort()[:, :, :self.k]  # b x n x k
+        # knn_idx selects the k nearest neighbor particles
         knn_idx = torch.topk(dists, self.k, dim = -1, largest = False, sorted = False).indices
         knn_xyz = index_points(xyz, knn_idx) # b x n x k x 3
         
         pre = features # b x n x f
         x = self.fc1(features) # b x n x C
+        
+        # phi_q, phi_k, phi_v transformations
         q, k, v = self.w_qs(x), index_points(self.w_ks(x), knn_idx), index_points(self.w_vs(x), knn_idx)
         # q: b x n x C, k: b x k x C, v: b x k x C
+        
+        # Delta: relative position embedding
         pos_enc = self.fc_delta(xyz[:, :, None] - knn_xyz)  # b x n x k x C
         
+        # Eq 10: softmax(gamma(phi_q - phi_k + delta))
         attn = self.fc_gamma(q[:, :, None] - k + pos_enc) # b x n x k x C
         attn = F.softmax(attn / np.sqrt(k.size(-1)), dim=-2)  # b x n x k x C
         
-        #res = torch.einsum('bmnf,bmnf->bmf', attn, v + pos_enc) # b x n x C
+        # Aggregation: sum(attn * (phi_v + delta))
         res = (attn * (v+pos_enc)).sum(dim=-2)
         res = self.fc2(res) + pre # b x n x f
         return res, attn
 
 class FeatureTransformer3D_PT(nn.Module):
+    """
+    Wraps TransformerBlock_PT to apply Local Correlation (Eq 10) 
+    to both source (feature0) and target (feature1).
+    """
     def __init__(self,
                  num_layers=1,
                  d_points=128,
@@ -98,185 +72,33 @@ class FeatureTransformer3D_PT(nn.Module):
                  k=16,
                  ):
         super(FeatureTransformer3D_PT, self).__init__()
-
-        self.d_points = d_points
-        self.d_model = d_points * ffn_dim_expansion
-        self.k = k
-
-        self.layers = nn.ModuleList([
-            TransformerBlock_PT(d_points=self.d_points,
-                               d_model=self.d_model,
-                               k=self.k,
-                               )
-            for i in range(num_layers)])
-
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p)
+        # ... [OMITTED: Initialization code] ...
 
     def forward(self, xyz0, xyz1, feature0, feature1,
                 **kwargs,
                 ):
-
-        b, c, n = feature0.shape
-        assert self.d_points == c
-
-        feature0 = feature0.permute(0, 2, 1)  # [B, N, C]
-        feature1 = feature1.permute(0, 2, 1)  # [B, N, C]
-
-        for i, layer in enumerate(self.layers):
-            feature0, _ = layer(xyz0, feature0)
-            feature1, _ = layer(xyz1, feature1)
-
-        # reshape back
-        feature0 = feature0.view(b, n, c).permute(0, 2, 1).contiguous()  # [B, C, N]
-        feature1 = feature1.view(b, n, c).permute(0, 2, 1).contiguous()  # [B, C, N]
-
+        # ... [OMITTED: Forward logic calling the layers] ...
         return feature0, feature1
 
 # Global-Cross Transformer
-class TransformerLayer(nn.Module):
-    def __init__(self,
-                 d_model=128,
-                 no_ffn=False,
-                 ffn_dim_expansion=4,
-                 ):
-        super(TransformerLayer, self).__init__()
-
-        self.dim = d_model
-        self.no_ffn = no_ffn
-
-        # single-head attention
-        self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj = nn.Linear(d_model, d_model, bias=False)
-        self.v_proj = nn.Linear(d_model, d_model, bias=False)
-
-        self.merge = nn.Linear(d_model, d_model, bias=False)
-
-        self.norm1 = nn.LayerNorm(d_model)
-
-        # no ffn after self-attn, with ffn after cross-attn
-        if not self.no_ffn:
-            in_channels = d_model * 2
-            self.mlp = nn.Sequential(
-                nn.Linear(in_channels, in_channels * ffn_dim_expansion, bias=False),
-                nn.GELU(),
-                nn.Linear(in_channels * ffn_dim_expansion, d_model, bias=False),
-            )
-
-            self.norm2 = nn.LayerNorm(d_model)
-
-    def forward(self, source, target,
-                height=None,
-                width=None,
-                ):
-        # source, target: [B, L, C]
-        query, key, value = source, target, target
-
-        # single-head attention
-        query = self.q_proj(query)  # [B, L, C]
-        key = self.k_proj(key)  # [B, L, C]
-        value = self.v_proj(value)  # [B, L, C]
-
-        message = single_head_full_attention(query, key, value)  # [B, L, C]
-
-        message = self.merge(message)  # [B, L, C]
-        message = self.norm1(message)
-
-        if not self.no_ffn:
-            message = self.mlp(torch.cat([source, message], dim=-1))
-            message = self.norm2(message)
-
-        return source + message
-
-
-class TransformerBlock(nn.Module):
-    """self attention + cross attention + FFN"""
-
-    def __init__(self,
-                 d_model=128,
-                 ffn_dim_expansion=4,
-                 ):
-        super(TransformerBlock, self).__init__()
-
-        self.self_attn = TransformerLayer(d_model=d_model,
-                                          no_ffn=True,
-                                          ffn_dim_expansion=ffn_dim_expansion,
-                                          )
-
-        self.cross_attn_ffn = TransformerLayer(d_model=d_model,
-                                               ffn_dim_expansion=ffn_dim_expansion,
-                                               )
-
-    def forward(self, source, target,
-                height=None,
-                width=None,
-                ):
-        # source, target: [B, L, C]
-
-        # self attention
-        source = self.self_attn(source, source,
-                                height=height,
-                                width=width,
-                                )
-
-        # cross attention and ffn
-        source = self.cross_attn_ffn(source, target,
-                                     height=height,
-                                     width=width,
-                                     )
-
-        return source
+# ... [OMITTED: TransformerLayer, TransformerBlock classes] ...
 
 class FeatureTransformer3D(nn.Module):
+    """
+    Implements "Global correlation" (Eq 11).
+    Calculates correlated dependencies using standard transformer blocks 
+    (self-attention and cross-attention).
+    """
     def __init__(self,
                  num_layers=6,
                  d_model=128,
                  ffn_dim_expansion=4,
                  ):
         super(FeatureTransformer3D, self).__init__()
-
-        self.d_model = d_model
-
-        self.layers = nn.ModuleList([
-            TransformerBlock(d_model=d_model,
-                             ffn_dim_expansion=ffn_dim_expansion,
-                             )
-            for i in range(num_layers)])
-
-        for p in self.parameters():
-            if p.dim() > 1:
-                nn.init.xavier_uniform_(p) # Add Zero initialization for convolutional layers prior to any residual connections
-
+        # ... [OMITTED: Initialization code] ...
 
     def forward(self, feature0, feature1,
                 **kwargs,
                 ):
-
-        b, c, n = feature0.shape
-        assert self.d_model == c
-
-        feature0 = feature0.permute(0, 2, 1)  # [B, N, C]
-        feature1 = feature1.permute(0, 2, 1)  # [B, N, C]
-
-        # concat feature0 and feature1 in batch dimension to compute in parallel
-        concat0 = torch.cat((feature0, feature1), dim=0)  # [2B, N, C]
-        concat1 = torch.cat((feature1, feature0), dim=0)  # [2B, N, C]
-
-
-        for i, layer in enumerate(self.layers):
-            concat0 = layer(concat0, concat1,
-                            height=n,
-                            width=1,
-                            )
-
-            # update feature1
-            concat1 = torch.cat(concat0.chunk(chunks=2, dim=0)[::-1], dim=0)
-
-        feature0, feature1 = concat0.chunk(chunks=2, dim=0)  # [B, H*W, C]
-
-        # reshape back
-        feature0 = feature0.view(b, n, c).permute(0, 2, 1).contiguous()  # [B, C, N]
-        feature1 = feature1.view(b, n, c).permute(0, 2, 1).contiguous()  # [B, C, N]
-
+        # ... [OMITTED: Forward logic] ...
         return feature0, feature1

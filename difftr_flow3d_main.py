@@ -97,6 +97,7 @@ class Trainer(object):
         self.checkpoint_dir.mkdir(exist_ok = True)
 
         # optimizer
+        # [Paper: Implementation details] "We utilized the AdamW optimizer... and a weight decay of 1 x 10^-4."
         self.opt = AdamW(self.model_without_ddp.parameters(), lr=train_lr, weight_decay=1e-4)
 
         # epoch counter state
@@ -157,11 +158,20 @@ class Trainer(object):
                 flow_set = torch.permute(flow_set, (0, 2, 1))
 
                 total_loss = 0.
+                
+                # [Paper: Double-frame] Forward training process.
+                # "Takes noisy flow motion... as input, and tries to separate the noise composition from it."
+                # The model internally handles the addition of noise (simulating particle displacement during diffusion).
                 loss, metrics_3d = self.model(flow_set, pcs)
+                
                 if isinstance(loss, float):
                     continue
                 if torch.isnan(loss):
                     continue
+                
+                # [Paper: Implementation details]
+                # The loss corresponds to the robust regression loss:
+                # L = sum((||D_est - D_gt||_1 + epsilon)^q), where epsilon=0.01 and q=0.4.
                 loss = loss / self.gradient_accumulate_every
                 total_loss += loss.item()
                 metrics_3d.update({'total_loss': total_loss})
@@ -241,17 +251,26 @@ class Trainer(object):
                 interval = 1
                 start_points = pcs[:, 0]
                 points_list = [start_points]
+                
+                # [Paper: Multi-frame] "We... perform a fast test-time training on a machine learning model to capture the consistency of time-resolved particle trajectory."
                 for i in range(interval, pcs.shape[1], interval):
                     if i == interval:
+                        # Initial frame uses standard diffusion sampling
                         pos_center = torch.mean(start_points, dim=-1, keepdim=True)
                         pred = self.model_without_ddp.sample(torch.cat([start_points-pos_center, pcs[:, i]-pos_center], dim=-2), return_all_timesteps = False)
                     else:
                         if i == 2*interval:
                             pflow = flow_pred[-1]
                         else:
+                            # [Paper: Multi-frame] Fit polynomial to previous points to predict next position.
+                            # "We simply learn a polynomial function to fit particle trajectories by optimizing a ridge regression model."
+                            # This provides "reliable initial conditions for the reverse diffusion process."
                             next_points = self.polyfit(torch.stack(points_list, dim=1).permute(0, 1, 3, 2).cpu().numpy())
                             next_points = torch.tensor(next_points, dtype=start_points.dtype, device=start_points.device).permute(0, 2, 1)
                             pflow = next_points - start_points
+                        
+                        # [Paper: Double-frame] Reverse inference: "gradually refines flow estimation by pushing source points to be closer to the target ones."
+                        # The prediction from polyfit (pflow) is used as the starting point (initial condition).
                         pos_center = torch.mean(start_points+pflow, dim=-1, keepdim=True)
                         pred = self.model_without_ddp.sample(torch.cat([start_points+pflow-pos_center, pcs[:, i]-pos_center], dim=-2), return_all_timesteps = False) + pflow
 
@@ -264,6 +283,11 @@ class Trainer(object):
                 points_list = torch.stack(points_list, dim=1)
                 flow_3d_mask = torch.ones(flow_3d[:,:,0,:].shape, dtype=torch.int64).cuda()
 
+                # [Paper: Evaluation metrics]
+                # EPE: Averaged end point error in meters.
+                # Acc3dStrict: Percentage of points with relative error < 5%.
+                # Acc3dRelax: Percentage of points with relative error < 10%.
+                # Outlier: Percentage of points with relative error > 10%.
                 epe, acc3d_strict, acc3d_relax, outlier = compute_epe2(torch.permute(flow_3d, (0, 1, 3, 2)).cpu().numpy(), 
                                                                        torch.permute(flow_pred, (0, 1, 3, 2)).cpu().numpy(), 
                                                                        flow_3d_mask.cpu().numpy())
@@ -293,15 +317,27 @@ class Trainer(object):
         return results
 
     def polyfit(self, data, degree=2, alpha=10.0):
+        """
+        [Paper: Multi-frame]
+        Implements Equation 13 for time-resolved tracking:
+        min_{W} { || XW - Y ||^2_2 + alpha || W ||^2_2 }
+        
+        Args:
+            data: Particle positions over timesteps (matches Y in eq).
+            degree: Degree of polynomial features (D in eq).
+            alpha: Regularization parameter (alpha in eq).
+        """
         predicted_next_frame = np.zeros((data.shape[0], data.shape[2], data.shape[3]))
         num_frames = min(data.shape[1], 3)
 
         poly_features = PolynomialFeatures(degree=degree)
+        # Using Ridge Regression to solve the minimization problem described in Eq. 13
         ridge_reg = Ridge(alpha=alpha)
 
         for b in range(data.shape[0]):
             for i in range(data.shape[3]):
                 t = np.arange(num_frames)
+                # X: Polynomial features derived from timesteps
                 X = poly_features.fit_transform(t.reshape(-1, 1))
                 y = data[b, -num_frames:, :, i]
 
@@ -356,6 +392,12 @@ class Tester(object):
             print(f"loading from version {data['version']}")
 
     def polyfit(self, data, degree=2, alpha=10.0):
+        """
+        [Paper: Multi-frame]
+        See Trainer.polyfit for details.
+        Solves: min_{W} { || XW - Y ||^2_2 + alpha || W ||^2_2 }
+        Used to extrapolate the next frame position as a coarse prediction.
+        """
         predicted_next_frame = np.zeros((data.shape[0], data.shape[2], data.shape[3]))
         num_frames = min(data.shape[1], 3)
 
@@ -420,9 +462,13 @@ class Tester(object):
                         if i == 2*interval:
                             pflow = flow_pred[-1]
                         else:
+                            # [Paper: Multi-frame] Use Ridge regression (Eq. 13) to predict next points
                             next_points = self.polyfit(torch.stack(points_list, dim=1).permute(0, 1, 3, 2).cpu().numpy())
                             next_points = torch.tensor(next_points, dtype=start_points.dtype, device=start_points.device).permute(0, 2, 1)
                             pflow = next_points - start_points
+                        
+                        # [Paper: Double-frame] Reverse inference
+                        # Use the coarse-grained prediction (pflow) as an initial condition.
                         pos_center = torch.mean(start_points+pflow, dim=-1, keepdim=True)
                         pred = self.model_without_ddp.sample(torch.cat([start_points+pflow-pos_center, pcs[:, i]-pos_center], dim=-2), return_all_timesteps = False) + pflow
 
@@ -436,6 +482,12 @@ class Tester(object):
                 flow_3d_mask = torch.ones(flow_3d[:,:,0,:].shape, dtype=torch.int64).cuda()
 
                 flow_3d_zeros = torch.zeros_like(flow_3d_mask, dtype=torch.int64).to(device)
+                
+                # [Paper: Evaluation metrics]
+                # EPE: End Point Error.
+                # Acc3dStrict: < 5% error.
+                # Acc3dRelax: < 10% error.
+                # Outliers: > 10% error.
                 epe, acc3d_strict, acc3d_relax, outlier = compute_epe2(torch.permute(flow_3d, (0, 1, 3, 2)).cpu().numpy(), 
                                                                        torch.permute(flow_pred, (0, 1, 3, 2)).cpu().numpy(), 
                                                                        flow_3d_mask.cpu().numpy())
@@ -528,12 +580,15 @@ if __name__ == '__main__':
                 num_transformer_pt_layers=args.num_transformer_pt_layers,
                 num_transformer_layers=args.num_transformer_layers).to(device)
     # diffusion
+    # [Paper: Implementation details]
+    # "The number of diffusion timesteps was set to 20."
+    # "During inference, we employed DDIM acceleration, reducing the reverse sampling process to 2 steps."
     diffusion = GaussianDiffusion(
         model,
         objective = 'pred_x0', # pred_x0
         beta_schedule = 'cosine',  # sigmoid, cosine, linear
-        timesteps = args.timesteps,           # number of steps
-        sampling_timesteps = args.samplingtimesteps    # number of sampling timesteps (using ddim for faster inference [see citation for ddim paper])
+        timesteps = args.timesteps,           # number of steps (Default: 20)
+        sampling_timesteps = args.samplingtimesteps    # number of sampling timesteps (Default: 2) for DDIM
     ).to(device)
 
     # # add argparse
@@ -572,7 +627,3 @@ if __name__ == '__main__':
             resume = args.resume,
         )
         trainer.train()
-
-
-
-

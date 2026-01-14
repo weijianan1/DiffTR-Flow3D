@@ -37,6 +37,7 @@ def extract(a, t, x_shape):
 def linear_beta_schedule(timesteps):
     """
     linear schedule, proposed in original ddpm paper
+    Corresponds to the "predefined variance schedule \beta_{1:N}" mentioned in the paper.
     """
     scale = 1000 / timesteps
     beta_start = scale * 0.0001
@@ -109,9 +110,12 @@ class GaussianDiffusion(nn.Module):
         else:
             raise ValueError(f'unknown beta schedule {beta_schedule}')
 
+        # The variance schedule \beta_{1:N}
         betas = beta_schedule_fn(timesteps, **schedule_fn_kwargs)
 
+        # \alpha := 1 - \beta
         alphas = 1. - betas
+        # \bar{\alpha}_{n} := \prod_{s=1}^{n} \alpha_{s}
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         alphas_cumprod_prev = F.pad(alphas_cumprod[:-1], (1, 0), value = 1.)
 
@@ -128,13 +132,16 @@ class GaussianDiffusion(nn.Module):
         register_buffer = lambda name, val: self.register_buffer(name, val.to(torch.float32))
         register_buffer('betas', betas) # beta_t
         register_buffer('alphas_cumprod', alphas_cumprod) # alpha_t_bar
+
+        # Mapping to paper equation (3): q(d_n|d_0) = N(d_n; \sqrt{\bar{\alpha}_n}d_0, (1-\bar{\alpha}_n)I)
         register_buffer('alphas_cumprod_prev', alphas_cumprod_prev)
         # calculations for diffusion q(x_t | x_{t-1}) and others
-        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod)) # 0
-        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod)) # 1
+        register_buffer('sqrt_alphas_cumprod', torch.sqrt(alphas_cumprod)) # Coefficient \sqrt{\bar{\alpha}_n} for the mean
+        register_buffer('sqrt_one_minus_alphas_cumprod', torch.sqrt(1. - alphas_cumprod)) # Coefficient \sqrt{1-\bar{\alpha}_n} for the variance/noise
         register_buffer('log_one_minus_alphas_cumprod', torch.log(1. - alphas_cumprod)) # 0
         register_buffer('sqrt_recip_alphas_cumprod', torch.sqrt(1. / alphas_cumprod)) # inf
         register_buffer('sqrt_recipm1_alphas_cumprod', torch.sqrt(1. / alphas_cumprod - 1)) # int
+        
         # calculations for posterior q(x_{t-1} | x_t, x_0)
         posterior_variance = betas * (1. - alphas_cumprod_prev) / (1. - alphas_cumprod) # eq7 variance
         # above: equal to 1. / (1. / (1. - alpha_cumprod_tm1) + alpha_t / beta_t)
@@ -190,6 +197,10 @@ class GaussianDiffusion(nn.Module):
         )
 
     def q_posterior(self, x_start, x_t, t):
+        """
+        Calculates the mean and variance for the posterior q(x_{t-1} | x_t, x_0).
+        This helps define the reverse process transition p_\theta(d_{n-1} | d_n) = N(d_{n-1}; \mu_\theta, \sigma_n^2 I).
+        """
         posterior_mean = (
             extract(self.posterior_mean_coef1, t, x_t.shape) * x_start +
             extract(self.posterior_mean_coef2, t, x_t.shape) * x_t
@@ -199,6 +210,11 @@ class GaussianDiffusion(nn.Module):
         return posterior_mean, posterior_variance, posterior_log_variance_clipped
 
     def model_predictions(self, x, t, x_self_cond = None, clip_x_start = False, rederive_pred_noise = False):
+        """
+        Uses the neural network \epsilon_\theta (or other parameterization) to predict.
+        Corresponds to the "re-parameterized via a noise prediction network \epsilon_\theta(d_n, n, c_f)" in the paper.
+        Here, 'x' is d_n, 't' is n, and 'x_self_cond' acts as part of the condition c_f.
+        """
         model_output = self.model(x, t, x_self_cond, state='val')
         maybe_clip = partial(torch.clamp, min = -1., max = 1.) if clip_x_start else identity
 
@@ -224,6 +240,10 @@ class GaussianDiffusion(nn.Module):
         return  ModelPrediction(pred_noise, x_start)
 
     def p_mean_variance(self, x, t, x_self_cond = None, clip_denoised = True):
+        """
+        Calculates \mu_\theta (model_mean) and \sigma_n^2 (posterior_variance) 
+        for the reverse process Eq (5): p_\theta(d_{n-1} | d_n).
+        """
         preds = self.model_predictions(x, t, x_self_cond)
         x_start = preds.pred_x_start
 
@@ -235,6 +255,10 @@ class GaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def p_sample(self, x, t: int, x_self_cond = None):
+        """
+        Performs one step of the reverse process to restore structure.
+        d_{n-1} ~ p_\theta(d_{n-1}|d_n).
+        """
         b, *_, device = *x.shape, self.device
         batched_times = torch.full((b,), t, device = device, dtype = torch.long)
         model_mean, _, model_log_variance, x_start = self.p_mean_variance(x = x, t = batched_times, x_self_cond = x_self_cond, clip_denoised = True)
@@ -258,6 +282,9 @@ class GaussianDiffusion(nn.Module):
 
     @torch.inference_mode()
     def ddim_sample(self, shape, self_cond, return_all_timesteps = False):
+        """
+        "For computational efficiency, we adopt DDIM [Song et al. 2020] as our sampling strategy to estimate the flow motion."
+        """
         batch, device, total_timesteps, sampling_timesteps, eta, objective = shape[0], self.device, self.num_timesteps, self.sampling_timesteps, self.ddim_sampling_eta, self.objective
         times = torch.linspace(-1, total_timesteps - 1, steps = sampling_timesteps + 1)   # [-1, 0, 1, 2, ..., T-1] when sampling_timesteps == total_timesteps
         times = list(reversed(times.int().tolist()))
@@ -294,6 +321,12 @@ class GaussianDiffusion(nn.Module):
     @torch.inference_mode()
     @autocast(enabled = False)
     def q_sample(self, x_start, t, noise = None):
+        """
+        Implements the diffusion forward process (Eq. 3):
+        q(d_n | d_0) = N(d_n; \sqrt{\bar{\alpha}_n}d_0, (1 - \bar{\alpha}_n)I)
+        Uses the reparameterization trick to sample d_n at arbitrary timestep n.
+        x_start corresponds to d_0.
+        """
         noise = default(noise, lambda: torch.randn_like(x_start)).cuda() # torch.Size([16, 8192, 3])
         return (
             extract(self.sqrt_alphas_cumprod, t, x_start.shape) * x_start + # B 3 N
@@ -301,6 +334,11 @@ class GaussianDiffusion(nn.Module):
         )
 
     def p_losses(self, x_start, pcs, t, noise = None, offset_noise_strength = None):
+        """
+        Calculates the training objective \mathcal{L}_\theta.
+        The goal is to predict the noise \epsilon added to the data.
+        'pcs' corresponds to the task-specific condition c_f (source point set P_s and target P_t).
+        """
         b, _, n = x_start.shape
         noise = default(noise, lambda: torch.randn_like(x_start))
         # offset noise - https://www.crosslabs.org/blog/diffusion-with-offset-noise
@@ -308,11 +346,15 @@ class GaussianDiffusion(nn.Module):
         if offset_noise_strength > 0.:
             offset_noise = torch.randn(x_start.shape[:2], device = self.device)
             noise += offset_noise_strength * offset_noise[:,:,None,None]
-        # noise sample
+        
+        # noise sample: q(d_n | d_0)
         x = self.q_sample(x_start = x_start, t = t, noise = noise)
         x_self_cond = pcs
+        
         # predict and take gradient step
+        # model_out is \epsilon_\theta(d_n, n, c_f)
         model_out = self.model(x, t, x_self_cond) # torch.Size([16, 3, 8192]) torch.Size([16]) torch.Size([16, 8192, 6])
+        
         if self.objective == 'pred_noise':
             target = noise.cuda()
         elif self.objective == 'pred_x0':
@@ -322,6 +364,8 @@ class GaussianDiffusion(nn.Module):
             target = v.cuda()
         else:
             raise ValueError(f'unknown objective {self.objective}')
+        
+        # Corresponds to || \epsilon - \epsilon_\theta(...) ||^2
         loss, metrics_3d = sceneflow_loss_func(model_out, target)
         return loss.mean(), metrics_3d
 
@@ -329,5 +373,3 @@ class GaussianDiffusion(nn.Module):
         b, n, _, device, = *flow_3d.shape, flow_3d.device
         t = torch.randint(0, self.num_timesteps, (b,), device=device).long() # torch.Size([B])
         return self.p_losses(flow_3d, pcs, t, *args, **kwargs)
-
-
