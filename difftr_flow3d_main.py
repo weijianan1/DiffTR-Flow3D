@@ -84,7 +84,7 @@ class Trainer(object):
                                                         pin_memory=True, drop_last=True,
                                                         sampler=None)
         # load datasets
-        self.val_dataset = build_test_dataset(self.dataset)
+        self.val_dataset = build_test_dataset(self.dataset, args.test_path)
         self.val_loader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.test_batch_size,
                                                         shuffle=False, num_workers=2,
                                                         pin_memory=True, drop_last=False,
@@ -427,7 +427,7 @@ class Tester(object):
             self.epoch = data['epoch']
 
             # load datasets
-            self.val_dataset = build_test_dataset(self.dataset)
+            self.val_dataset = build_test_dataset(self.dataset, args.test_path)
             self.val_loader = torch.utils.data.DataLoader(self.val_dataset, batch_size=self.test_batch_size,
                                                             shuffle=False, num_workers=2,
                                                             pin_memory=True, drop_last=False,
@@ -557,6 +557,10 @@ def get_args_parser():
 
 if __name__ == '__main__':
     parser = get_args_parser()
+    parser.add_argument(
+        "--test_path",
+        type=str,
+    )
     args = parser.parse_args()
 
     # set random seed
